@@ -1,0 +1,199 @@
+import streamlit as st
+from pymongo import MongoClient
+import pandas as pd
+
+# MongoDB Connection
+client = MongoClient("mongodb://localhost:27017/")
+db = client["feedback_db"]
+collection = db["customer_feedback"]
+
+# Streamlit UI
+st.title("Customer Feedback Collector")
+
+# Feedback Form
+with st.form("feedback_form"):
+    name = st.text_input("Name")
+    rating = st.slider("Rating", 1, 5, 3)
+    comments = st.text_area("Comments")
+    submit = st.form_submit_button("Submit Feedback")
+
+    if submit:
+        if name and comments:
+            feedback = {"name": name, "rating": rating, "comments": comments}
+            collection.insert_one(feedback)
+            st.success("Thank you for your feedback!")
+        else:
+            st.error("Please fill all fields.")
+
+# Admin Dashboard
+st.subheader("Admin Dashboard")
+feedback_data = list(collection.find({}, {"_id": 0}))
+
+if feedback_data:
+    df = pd.DataFrame(feedback_data)
+    avg_rating = df["rating"].mean()
+    st.metric("Average Rating", round(avg_rating, 2))
+    
+    filter_rating = st.slider("Filter by Rating", 1, 5, (1, 5))
+    filtered_df = df[(df["rating"] >= filter_rating[0]) & (df["rating"] <= filter_rating[1])]
+    st.dataframe(filtered_df)
+else:
+    st.info("No feedback available yet.")
+
+
+
+
+code with 7 modiifcations:
+
+import streamlit as st
+from pymongo import MongoClient
+import pandas as pd
+import hashlib
+from textblob import TextBlob
+from io import BytesIO
+from fpdf import FPDF
+import base64
+import openpyxl
+import smtplib
+from email.message import EmailMessage
+
+# MongoDB Connection
+client = MongoClient("mongodb://localhost:27017/")
+db = client["feedback_db"]
+collection = db["customer_feedback"]
+users_collection = db["users"]
+
+# Helper Functions
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def check_user(email, password):
+    user = users_collection.find_one({"email": email, "password": hash_password(password)})
+    return user
+
+def get_sentiment(comment):
+    return TextBlob(comment).sentiment.polarity
+
+def export_pdf(df):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    for i, row in df.iterrows():
+        pdf.cell(200, 10, txt=f"Name: {row['name']}, Rating: {row['rating']}, Comment: {row['comments']}", ln=True)
+    return pdf.output(dest='S').encode('latin-1')
+
+def send_email_notification(email):
+    try:
+        msg = EmailMessage()
+        msg.set_content("Thank you for your feedback!")
+        msg["Subject"] = "Feedback Confirmation"
+        msg["From"] = "youremail@example.com"
+        msg["To"] = email
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login("youremail@example.com", "yourpassword")
+        server.send_message(msg)
+        server.quit()
+    except Exception as e:
+        st.warning(f"Email failed: {e}")
+
+# Streamlit App
+st.title("Customer Feedback Collector")
+menu = ["Login", "Sign Up", "Forgot Password"]
+choice = st.sidebar.selectbox("Menu", menu)
+
+if "role" not in st.session_state:
+    st.session_state.role = None
+
+if choice == "Sign Up":
+    st.subheader("Create New Account")
+    email = st.text_input("Email")
+    password = st.text_input("Password", type='password')
+    role = st.selectbox("Role", ["user", "admin"])
+    if st.button("Sign Up"):
+        if users_collection.find_one({"email": email}):
+            st.error("User already exists")
+        else:
+            users_collection.insert_one({"email": email, "password": hash_password(password), "role": role})
+            st.success("Account created successfully")
+
+elif choice == "Forgot Password":
+    st.subheader("Reset Password")
+    email = st.text_input("Registered Email")
+    new_password = st.text_input("New Password", type='password')
+    if st.button("Reset Password"):
+        result = users_collection.update_one({"email": email}, {"$set": {"password": hash_password(new_password)}})
+        if result.modified_count:
+            st.success("Password updated")
+        else:
+            st.error("Email not found")
+
+elif choice == "Login":
+    st.subheader("Login to Continue")
+    email = st.text_input("Email")
+    password = st.text_input("Password", type='password')
+    if st.button("Login"):
+        user = check_user(email, password)
+        if user:
+            st.session_state.email = email
+            st.session_state.role = user['role']
+            st.success(f"Welcome {email}")
+        else:
+            st.error("Invalid Credentials")
+
+if st.session_state.role:
+    if st.session_state.role == "user":
+        st.subheader("Submit Feedback")
+        with st.form("feedback_form"):
+            name = st.text_input("Name")
+            rating = st.slider("Rating", 1, 5, 3)
+            comments = st.text_area("Comments")
+            submit = st.form_submit_button("Submit Feedback")
+            if submit and name and comments:
+                sentiment = "Positive" if get_sentiment(comments) > 0 else "Negative"
+                feedback = {"name": name, "rating": rating, "comments": comments, "sentiment": sentiment, "email": st.session_state.email}
+                collection.insert_one(feedback)
+                st.success("Thank you for your feedback!")
+                send_email_notification(st.session_state.email)
+
+    elif st.session_state.role == "admin":
+        option = st.radio("Choose an option", ["📊 Admin Dashboard", "📝 Submit Feedback"])
+
+        if option == "📝 Submit Feedback":
+            st.subheader("Submit Feedback")
+            with st.form("admin_feedback_form"):
+                name = st.text_input("Name")
+                rating = st.slider("Rating", 1, 5, 3, key="admin_rating")
+                comments = st.text_area("Comments")
+                submit = st.form_submit_button("Submit Feedback")
+                if submit and name and comments:
+                    sentiment = "Positive" if get_sentiment(comments) > 0 else "Negative"
+                    feedback = {"name": name, "rating": rating, "comments": comments, "sentiment": sentiment, "email": st.session_state.email}
+                    collection.insert_one(feedback)
+                    st.success("Thank you for your feedback!")
+                    send_email_notification(st.session_state.email)
+
+        elif option == "📊 Admin Dashboard":
+            st.subheader("Dashboard")
+            feedback_data = list(collection.find({}, {"_id": 0}))
+            if feedback_data:
+                df = pd.DataFrame(feedback_data)
+                st.dataframe(df)
+                st.metric("Average Rating", round(df["rating"].mean(), 2))
+                st.bar_chart(df['rating'].value_counts())
+                st.bar_chart(df['sentiment'].value_counts())
+
+                export_format = st.selectbox("Export as", ["CSV", "Excel", "PDF"])
+                if export_format == "CSV":
+                    st.download_button("Download CSV", df.to_csv(index=False), "feedback.csv", "text/csv")
+                elif export_format == "Excel":
+                    excel_buffer = BytesIO()
+                    with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+                        df.to_excel(writer, index=False, sheet_name='Feedback')
+                    st.download_button("Download Excel", data=excel_buffer.getvalue(), file_name="feedback.xlsx")
+                elif export_format == "PDF":
+                    pdf_data = export_pdf(df)
+                    st.download_button("Download PDF", data=pdf_data, file_name="feedback.pdf")
+            else:
+                st.info("No feedback available yet.")
