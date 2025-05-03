@@ -1,0 +1,290 @@
+import streamlit as st
+import pandas as pd
+import bcrypt
+from datetime import datetime
+from pymongo import MongoClient
+from wordcloud import WordCloud
+import matplotlib.pyplot as plt
+from io import BytesIO
+from fpdf import FPDF
+import os
+import seaborn as sns
+from textblob import TextBlob
+
+# MongoDB setup
+client = MongoClient("mongodb://localhost:27017/")
+db = client["customer_feedback"]
+users_collection = db["users"]
+feedback_collection = db["feedback"]
+
+# Run once to clean duplicates
+def remove_duplicate_feedbacks():
+    seen = set()
+    for doc in feedback_collection.find():
+        key = (doc.get("name"), doc.get("feedback"), doc.get("category"), doc.get("rating"))
+        if key in seen:
+            feedback_collection.delete_one({"_id": doc["_id"]})
+        else:
+            seen.add(key)
+# Uncomment below line to run once
+# remove_duplicate_feedbacks()
+
+# App title and styling
+st.set_page_config(page_title="Customer Feedback Portal", layout="wide")
+st.markdown("""
+    <style>
+    .main-title {
+        font-size: 48px;
+        color: #FFD700;
+        text-align: center;
+        font-weight: bold;
+        margin-bottom: 10px;
+    }
+    .subtitle {
+        font-size: 20px;
+        text-align: center;
+        color: #ADD8E6;
+        margin-bottom: 40px;
+    }
+    .stButton>button {
+        background-color: #4CAF50;
+        color: white;
+        border-radius: 8px;
+        height: 3em;
+        width: 100%;
+    }
+    .stTextInput>div>input {
+        border-radius: 8px;
+    }
+    .main-title {
+        animation: fadeIn 2s ease-in-out;
+    }
+    @keyframes fadeIn {
+        0% { opacity: 0; transform: translateY(-20px); }
+        100% { opacity: 1; transform: translateY(0); }
+    }
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("<div class='main-title'>Customer Feedback Collector System</div>", unsafe_allow_html=True)
+st.markdown("<div class='subtitle'>Our Moto: Collect, Analyze, and Manage Feedback Effectively</div>", unsafe_allow_html=True)
+
+# Password handling
+def hash_password(password):
+    return bcrypt.hashpw(password.encode(), bcrypt.gensalt())
+
+def check_password(password, hashed):
+    return bcrypt.checkpw(password.encode(), hashed)
+
+# Login page
+def login():
+    st.subheader("🔐 Login")
+    email = st.text_input("Email", key="login_email")
+    password = st.text_input("Password", type="password", key="login_password")
+
+    if st.button("Login"):
+        user = users_collection.find_one({"email": email})
+        if user and check_password(password, user["password"]):
+            st.session_state["user"] = user
+            st.success(f"Welcome {user['email']}!")
+            st.session_state["view"] = "dashboard"
+            st.rerun()
+        else:
+            st.error("Invalid credentials")
+
+# Registration page
+def register():
+    st.subheader("📝 Register")
+    email = st.text_input("Email", key="register_email")
+    password = st.text_input("Password", type="password", key="register_password")
+    role = st.selectbox("Role", ["user", "admin"], key="register_role")
+
+    if st.button("Register"):
+        if users_collection.find_one({"email": email}):
+            st.warning("User already exists.")
+        else:
+            hashed_pw = hash_password(password)
+            users_collection.insert_one({"email": email, "password": hashed_pw, "role": role})
+            st.success("Registration successful! You can now login.")
+            st.snow()
+
+# Forgot password
+def forgot_password():
+    st.subheader("🔐 Forgot Password")
+    email = st.text_input("Enter your registered email", key="forgot_email")
+    new_password = st.text_input("New Password", type="password", key="forgot_password")
+
+    if st.button("Reset Password"):
+        user = users_collection.find_one({"email": email})
+        if user:
+            hashed = hash_password(new_password)
+            users_collection.update_one({"email": email}, {"$set": {"password": hashed}})
+            st.success("Password updated. Please login.")
+        else:
+            st.error("Email not found.")
+
+# Feedback submission with duplication check
+def feedback_form():
+    st.subheader("🗣️ Submit Feedback")
+    name = st.text_input("Your Name")
+    feedback = st.text_area("Your Feedback")
+    category = st.selectbox("Category", ["Product", "Service", "Support", "Other"])
+    rating = st.slider("Rate Us (1 to 5)", 1, 5, 3)
+
+    if st.button("Submit"):
+        if name and feedback:
+            sentiment = TextBlob(feedback).sentiment.polarity
+            sentiment_label = "Positive" if sentiment > 0 else "Negative" if sentiment < 0 else "Neutral"
+            duplicate = feedback_collection.find_one({
+                "name": name,
+                "feedback": feedback,
+                "category": category,
+                "rating": rating
+            })
+            if duplicate:
+                st.warning("You have already submitted this feedback.")
+            else:
+                feedback_collection.insert_one({
+                    "name": name,
+                    "feedback": feedback,
+                    "category": category,
+                    "rating": rating,
+                    "sentiment": sentiment_label,
+                    "timestamp": datetime.now(),
+                    "user_email": st.session_state["user"]["email"]
+                })
+                st.success("Thank you for your feedback!")
+                st.balloons()
+                st.rerun()
+        else:
+            st.warning("Please fill in all fields.")
+
+# Admin dashboard with filter and sentiment analysis
+def admin_dashboard():
+    st.markdown("## 📊 Admin Dashboard")
+    #st.subheader("📊 Admin Dashboard")
+    df = pd.DataFrame(list(feedback_collection.find({}, {"_id": 0})))
+
+    if df.empty:
+        st.info("No feedback yet.")
+        return
+
+    df = df.drop_duplicates()
+
+    with st.expander("🔍 Search & Filter"):
+        name_filter = st.text_input("Search by Name")
+        keyword_filter = st.text_input("Search by Keyword in Feedback")
+        sentiment_filter = st.selectbox("Filter by Sentiment", ["All", "Positive", "Neutral", "Negative"])
+
+        if name_filter:
+            df = df[df["name"].str.contains(name_filter, case=False, na=False)]
+        if keyword_filter:
+            df = df[df["feedback"].str.contains(keyword_filter, case=False, na=False)]
+        if sentiment_filter != "All":
+            df = df[df["sentiment"] == sentiment_filter]
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### Feedback Overview")
+        st.dataframe(df)
+
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button("Download CSV", csv, "feedback.csv")
+
+        excel_buffer = BytesIO()
+        df.to_excel(excel_buffer, index=False, engine='openpyxl')
+        st.download_button("Download Excel", excel_buffer.getvalue(), "feedback.xlsx")
+
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        for index, row in df.iterrows():
+            pdf.cell(200, 10, txt=f"{row['name']} | {row['category']} | {row['rating']} | {row['sentiment']}", ln=True)
+
+        pdf_output = pdf.output(dest='S').encode('latin1')
+        st.download_button("Download PDF", data=pdf_output, file_name="feedback.pdf")
+
+    with col2:
+        st.markdown("### Word Cloud")
+        text = " ".join(df["feedback"].astype(str))
+        wordcloud = WordCloud(width=600, height=400, background_color='white').generate(text)
+        fig, ax = plt.subplots()
+        ax.imshow(wordcloud, interpolation='bilinear')
+        ax.axis("off")
+        st.pyplot(fig)
+
+        st.markdown("### Ratings Overview")
+        rating_counts = df['rating'].value_counts().sort_index()
+        fig2, ax2 = plt.subplots()
+        sns.barplot(x=rating_counts.index, y=rating_counts.values, ax=ax2, palette="Greens_d")
+        ax2.set_xlabel("Rating")
+        ax2.set_ylabel("Count")
+        ax2.set_title("Feedback Ratings Distribution")
+        st.pyplot(fig2)
+
+        if "sentiment" in df.columns:
+            st.markdown("### Sentiment Summary")
+            sent_counts = df['sentiment'].value_counts()
+            fig3, ax3 = plt.subplots()
+            sns.barplot(x=sent_counts.index, y=sent_counts.values, ax=ax3, palette="Blues")
+            ax3.set_ylabel("Count")
+            ax3.set_title("Feedback Sentiment")
+            st.pyplot(fig3)
+
+        st.markdown("### Rating Distribution (Pie Chart)")
+        fig4, ax4 = plt.subplots()
+        ax4.pie(rating_counts.values, labels=rating_counts.index, autopct='%1.1f%%', startangle=90)
+        ax4.axis('equal')
+        st.pyplot(fig4)
+
+        st.markdown("### Category Distribution (Horizontal Bar Chart)")
+        cat_counts = df['category'].value_counts()
+        fig5, ax5 = plt.subplots()
+        sns.barplot(y=cat_counts.index, x=cat_counts.values, ax=ax5, palette="Set2")
+        ax5.set_xlabel("Count")
+        ax5.set_ylabel("Category")
+        ax5.set_title("Feedback by Category")
+        st.pyplot(fig5)
+
+        st.markdown("### Feedback Over Time (Line Chart)")
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            df_time = df.dropna(subset=['timestamp']).copy()
+            df_time['date'] = df_time['timestamp'].dt.date
+            trend_data = df_time.groupby('date').size()
+            fig6, ax6 = plt.subplots()
+            trend_data.plot(kind='line', marker='o', ax=ax6, color='purple')
+            ax6.set_title("Feedback Trend Over Time")
+            ax6.set_xlabel("Date")
+            ax6.set_ylabel("Number of Feedbacks")
+            ax6.grid(True)
+            st.pyplot(fig6)
+
+# Main
+if "user" not in st.session_state:
+    st.sidebar.title("🔐 Welcome")
+    page = st.sidebar.radio("Choose Action", ["Login", "Register", "Forgot Password"])
+    if page == "Login":
+        login()
+    elif page == "Register":
+        register()
+    else:
+        forgot_password()
+else:
+    st.sidebar.success(f"Logged in as: {st.session_state['user']['email']}")
+    role = st.session_state["user"]["role"]
+
+    if role == "admin":
+        option = st.sidebar.radio("Select Dashboard", ["User Dashboard", "Admin Dashboard"])
+    else:
+        option = "User Dashboard"
+
+    if st.sidebar.button("Logout"):
+        st.session_state.clear()
+        st.rerun()
+
+    if option == "User Dashboard":
+        feedback_form()
+    elif option == "Admin Dashboard" and role == "admin":
+        admin_dashboard()
